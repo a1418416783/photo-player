@@ -9,7 +9,7 @@
     <application
         android:label="相册播放器"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@android:drawable/sym_def_app_icon">
         
         <activity
             android:name=".MainActivity"
