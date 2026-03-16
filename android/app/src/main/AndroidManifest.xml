@@ -8,6 +8,7 @@
     
     <application
         android:label="相册播放器"
+        android:name="${applicationName}"
         android:icon="@android:drawable/ic_menu_gallery">
         
         <activity
@@ -21,5 +22,9 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
     </application>
 </manifest>
