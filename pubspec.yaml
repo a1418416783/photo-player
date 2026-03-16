@@ -1,5 +1,5 @@
 name: photo_player
-description: Photo and video slideshow player
+description: Photo and video player app
 
 publish_to: 'none'
 
@@ -14,12 +14,9 @@ dependencies:
   
   cupertino_icons: ^1.0.2
   file_picker: ^6.1.1
-  permission_handler: ^11.1.0
   video_player: ^2.8.1
-  path_provider: ^2.1.1
   path: ^1.8.3
   provider: ^6.1.1
-  shared_preferences: ^2.2.2
 
 dev_dependencies:
   flutter_test:
