@@ -1,0 +1,26 @@
+photo-player/
+├── .github/
+│   └── workflows/
+│       └── build.yml 
+├── android/
+│   ├── app/
+│   │   ├── src/
+│   │   │   └── main/
+│   │   │       ├── kotlin/
+│   │   │       │   └── com/
+│   │   │       │       └── example/
+│   │   │       │           └── photo_player/
+│   │   │       │               └── MainActivity.kt
+│   │   │       └── AndroidManifest.xml 
+│   │   └── build.gradle 
+│   ├── gradle/
+│   │   └── wrapper/
+│   │       ├── gradle-wrapper.properties
+│   │       └── gradle-wrapper.jar (二进制文件，可选)
+│   ├── build.gradle
+│   ├── settings.gradle
+│   └── gradle.properties
+├── lib/
+│   └── main.dart 
+├── pubspec.yaml 
+└── analysis_options.yaml
