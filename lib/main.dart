@@ -386,9 +386,18 @@ class MusicProvider with ChangeNotifier {
 }
 
 class MediaScanner {
-  static const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif', 'tiff', 'tif', 'svg', 'ico', 'jfif', 'pjpeg', 'pjp', 'avif'];
+  static const imageExts = [
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp',
+    'heic', 'heif', 'tiff', 'tif', 'svg', 'ico',
+    'jfif', 'pjpeg', 'pjp', 'avif',
+  ];
+  
   static const videoExts = ['mp4', 'avi', 'mov', 'mkv', '3gp', 'webm', 'flv'];
-  static const skipDirs = ['Android', '.thumbnails', 'thumbnails', 'cache', '.cache', 'temp', '.temp', 'system', '.system', 'data', 'obb'];
+  
+  static const skipDirs = [
+    'Android', '.thumbnails', 'thumbnails', 'cache', '.cache',
+    'temp', '.temp', 'system', '.system', 'data', 'obb',
+  ];
   
   int _scannedCount = 0;
   int _foundCount = 0;
@@ -396,86 +405,112 @@ class MediaScanner {
   bool _shouldStop = false;
   
   MediaScanner({this.onProgress});
-  void stop() => _shouldStop = true;
+  
+  void stop() {
+    _shouldStop = true;
+  }
   
   Future<List<MediaFile>> scanDirectory(String dirPath) async {
     final mediaFiles = <MediaFile>[];
     final directory = Directory(dirPath);
+    
     if (!await directory.exists()) {
       print('目录不存在: $dirPath');
       return mediaFiles;
     }
+    
     _scannedCount = 0;
     _foundCount = 0;
     _shouldStop = false;
+    
     try {
       await _scanRecursively(directory, mediaFiles, 0);
       print('扫描完成，共找到 ${mediaFiles.length} 个媒体文件');
     } catch (e, stackTrace) {
-      print('扫描错误: $e\n堆栈: $stackTrace');
+      print('扫描错误: $e');
+      print('堆栈: $stackTrace');
     }
+    
     return mediaFiles;
   }
   
   Future<List<MediaFile>> scanAllImages() async {
     print('========== 开始扫描整个设备 ==========');
     print('开始时间: ${DateTime.now()}');
+    
     final allMediaFiles = <MediaFile>[];
     final rootPath = '/storage/emulated/0';
     final rootDir = Directory(rootPath);
+    
     if (!await rootDir.exists()) {
       print('根目录不存在');
       return allMediaFiles;
     }
+    
     _scannedCount = 0;
     _foundCount = 0;
     _shouldStop = false;
+    
     try {
       await _scanInBatchesOptimized(rootDir, allMediaFiles);
+      
       print('========== 扫描完成 ==========');
       print('扫描的文件总数: $_scannedCount');
       print('找到的媒体文件: ${allMediaFiles.length}');
       print('完成时间: ${DateTime.now()}');
+      
     } catch (e, stackTrace) {
       print('扫描失败: $e');
       print('堆栈: $stackTrace');
       print('已扫描: $_scannedCount 个文件, 已找到: ${allMediaFiles.length} 个媒体');
     }
+    
     final uniqueFiles = <String, MediaFile>{};
     for (var file in allMediaFiles) {
       uniqueFiles[file.path] = file;
     }
+    
     final result = uniqueFiles.values.toList();
+    
     if (result.length != allMediaFiles.length) {
       print('去重: ${allMediaFiles.length} → ${result.length}');
     }
+    
     try {
       result.sort((a, b) => b.lastModified.compareTo(a.lastModified));
     } catch (e) {
       print('排序失败: $e');
     }
+    
     return result;
   }
   
   Future<void> _scanInBatchesOptimized(Directory rootDir, List<MediaFile> result) async {
     final queue = <Directory>[rootDir];
-    int processedDirs = 0, skippedDirs = 0, errorDirs = 0;
+    int processedDirs = 0;
+    int skippedDirs = 0;
+    int errorDirs = 0;
+    
     final startTime = DateTime.now();
     print('开始批量扫描...');
     
     while (queue.isNotEmpty && !_shouldStop) {
       final currentDir = queue.removeAt(0);
       final dirName = path.basename(currentDir.path);
+      
       if (_shouldSkipDirectory(dirName)) {
         skippedDirs++;
         continue;
       }
+      
       processedDirs++;
+      
       if (processedDirs % 50 == 0) {
         final elapsed = DateTime.now().difference(startTime);
         print('进度: 已处理 $processedDirs 个目录, 找到 ${result.length} 个文件, 耗时: ${elapsed.inMinutes}分${elapsed.inSeconds % 60}秒');
         onProgress?.call(result.length, currentDir.path);
       }
+      
       try {
         final entities = await currentDir.list().toList().timeout(
           const Duration(seconds: 60),
@@ -484,17 +519,21 @@ class MediaScanner {
             return [];
           },
         );
+        
         for (var i = 0; i < entities.length && !_shouldStop; i++) {
           final entity = entities[i];
+          
           try {
             if (entity is Directory) {
               queue.add(entity);
             } else if (entity is File) {
               _scannedCount++;
+              
               if (_scannedCount % 200 == 0) {
                 onProgress?.call(result.length, currentDir.path);
                 await Future.delayed(const Duration(microseconds: 100));
               }
+              
               final mediaFile = await _processFileFast(entity);
               if (mediaFile != null) {
                 result.add(mediaFile);
@@ -505,25 +544,34 @@ class MediaScanner {
             continue;
           }
         }
+        
         if (processedDirs % 100 == 0) {
           await Future.delayed(const Duration(milliseconds: 5));
         }
+        
       } catch (e) {
         errorDirs++;
         print('扫描目录失败: ${currentDir.path}, 错误: $e');
         continue;
       }
     }
+    
     final totalTime = DateTime.now().difference(startTime);
     print('扫描统计: 处理目录=$processedDirs, 跳过=$skippedDirs, 错误=$errorDirs, 扫描文件=$_scannedCount, 找到媒体=$_foundCount, 耗时=${totalTime.inMinutes}分${totalTime.inSeconds % 60}秒');
   }
   
   Future<void> _scanRecursively(Directory folder, List<MediaFile> result, int depth) async {
     if (depth > 10 || _shouldStop) return;
+    
     try {
-      final entities = await folder.list().toList().timeout(const Duration(seconds: 60), onTimeout: () => []);
+      final entities = await folder.list().toList().timeout(
+        const Duration(seconds: 60),
+        onTimeout: () => [],
+      );
+      
       for (var entity in entities) {
         if (_shouldStop) break;
+        
         try {
           if (entity is Directory) {
             final dirName = path.basename(entity.path);
@@ -532,12 +580,16 @@ class MediaScanner {
             }
           } else if (entity is File) {
             _scannedCount++;
+            
             if (_scannedCount % 200 == 0) {
               onProgress?.call(result.length, folder.path);
               await Future.delayed(const Duration(microseconds: 100));
             }
+            
             final mediaFile = await _processFileFast(entity);
-            if (mediaFile != null) result.add(mediaFile);
+            if (mediaFile != null) {
+              result.add(mediaFile);
+            }
           }
         } catch (e) {
           continue;
@@ -550,10 +602,12 @@ class MediaScanner {
   
   bool _shouldSkipDirectory(String dirName) {
     if (dirName.startsWith('.')) return true;
+    
     final lowerName = dirName.toLowerCase();
     for (var skipDir in skipDirs) {
       if (lowerName == skipDir.toLowerCase()) return true;
     }
+    
     return false;
   }
   
@@ -561,9 +615,9 @@ class MediaScanner {
     try {
       final ext = path.extension(file.path).toLowerCase().replaceAll('.', '');
       if (ext.isEmpty) return null;
+      
       final fileName = path.basename(file.path);
       
-      // 检查文件大小
       try {
         final fileSize = await file.length().timeout(
           const Duration(milliseconds: 100),
@@ -574,7 +628,6 @@ class MediaScanner {
         return null;
       }
       
-      // 获取文件信息 - 修复空安全问题
       int lastModified;
       try {
         final stat = await file.stat().timeout(
@@ -583,7 +636,6 @@ class MediaScanner {
         );
         lastModified = stat.modified.millisecondsSinceEpoch;
       } catch (e) {
-        // 如果获取stat失败，使用当前时间
         lastModified = DateTime.now().millisecondsSinceEpoch;
       }
       
