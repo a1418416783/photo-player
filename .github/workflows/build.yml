@@ -7,6 +7,13 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+  packages: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -65,9 +72,11 @@ jobs:
           5. 安装完成后打开应用
           
           ### 使用方法
-          1. 打开应用后，授予存储权限
-          2. 点击"选择文件夹"按钮
+          1. 打开应用后，点击"选择文件夹"
+          2. 系统会自动请求存储权限，点击"允许"
           3. 选择包含照片/视频的文件夹
           4. 应用会自动开始播放
+          
+          构建时间: ${{ github.event.head_commit.timestamp }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
