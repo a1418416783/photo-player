@@ -23,6 +23,9 @@ dependencies:
   share_plus: ^7.2.1          # 分享功能
   audioplayers: ^5.2.1        # 背景音乐
   path_provider: ^2.1.1       # 文件路径
+  sqflite: ^2.3.0
+  wakelock_plus: ^1.2.0
+  intl: ^0.18.1  # 新增
 
 dev_dependencies:
   flutter_test:
