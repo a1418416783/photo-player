@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:async';
-import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -10,9 +9,14 @@ import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:intl/intl.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  WakelockPlus.enable();
   
   FlutterError.onError = (FlutterErrorDetails details) {
     FlutterError.presentError(details);
@@ -37,6 +41,7 @@ class MyApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => PlayerProvider()),
         ChangeNotifierProvider(create: (_) => FavoritesProvider()),
         ChangeNotifierProvider(create: (_) => MusicProvider()),
+        ChangeNotifierProvider(create: (_) => ThumbnailProvider()),
       ],
       child: MaterialApp(
         title: '相册播放器 Pro',
@@ -64,22 +69,260 @@ enum TransitionEffect {
   blur,
 }
 
+enum SortType {
+  timeNewest,
+  timeOldest,
+  folder,
+  dateGroup,  // 新增：按日期分组
+}
+
 class MediaFile {
-  final File file;
+  final String path;
   final MediaType type;
   final String name;
   final int? duration;
+  final int lastModified;
 
   MediaFile({
-    required this.file,
+    required this.path,
     required this.type,
     required this.name,
     this.duration,
+    required this.lastModified,
   });
 
-  String get path => file.path;
+  File get file => File(path);
   bool get isImage => type == MediaType.image;
   bool get isVideo => type == MediaType.video;
+  
+  String get folderPath => path.substring(0, path.lastIndexOf('/'));
+  
+  String get folderName {
+    final folder = folderPath;
+    return folder.substring(folder.lastIndexOf('/') + 1);
+  }
+  
+  DateTime get modifiedDate => DateTime.fromMillisecondsSinceEpoch(lastModified);
+  
+  // 获取日期分组标签
+  String get dateGroupLabel {
+    final now = DateTime.now();
+    final fileDate = modifiedDate;
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final fileDay = DateTime(fileDate.year, fileDate.month, fileDate.day);
+    
+    if (fileDay == today) {
+      return '今天';
+    } else if (fileDay == yesterday) {
+      return '昨天';
+    } else if (fileDay.isAfter(today.subtract(const Duration(days: 7)))) {
+      return '本周';
+    } else if (fileDay.isAfter(today.subtract(const Duration(days: 30)))) {
+      return '本月';
+    } else if (fileDate.year == now.year) {
+      return '${fileDate.month}月';
+    } else {
+      return '${fileDate.year}年';
+    }
+  }
+  
+  Map<String, dynamic> toMap() {
+    return {
+      'path': path,
+      'type': type == MediaType.image ? 'image' : 'video',
+      'name': name,
+      'duration': duration,
+      'lastModified': lastModified,
+    };
+  }
+  
+  factory MediaFile.fromMap(Map<String, dynamic> map) {
+    return MediaFile(
+      path: map['path'],
+      type: map['type'] == 'image' ? MediaType.image : MediaType.video,
+      name: map['name'],
+      duration: map['duration'],
+      lastModified: map['lastModified'],
+    );
+  }
+}
+
+// ==================== 数据库管理 ====================
+
+class MediaDatabase {
+  static Database? _database;
+  
+  static Future<Database> get database async {
+    if (_database != null) return _database!;
+    _database = await _initDatabase();
+    return _database!;
+  }
+  
+  static Future<Database> _initDatabase() async {
+    final documentsDirectory = await getApplicationDocumentsDirectory();
+    final dbPath = path.join(documentsDirectory.path, 'media_cache.db');
+    
+    return await openDatabase(
+      dbPath,
+      version: 1,
+      onCreate: (db, version) async {
+        await db.execute('''
+          CREATE TABLE media_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT UNIQUE,
+            type TEXT,
+            name TEXT,
+            duration INTEGER,
+            lastModified INTEGER,
+            scanTime INTEGER
+          )
+        ''');
+        
+        await db.execute('CREATE INDEX idx_path ON media_files(path)');
+        await db.execute('CREATE INDEX idx_scanTime ON media_files(scanTime)');
+      },
+    );
+  }
+  
+  static Future<void> saveMediaFiles(List<MediaFile> files) async {
+    final db = await database;
+    final batch = db.batch();
+    final scanTime = DateTime.now().millisecondsSinceEpoch;
+    
+    batch.delete('media_files');
+    
+    for (var file in files) {
+      final map = file.toMap();
+      map['scanTime'] = scanTime;
+      batch.insert('media_files', map);
+    }
+    
+    await batch.commit(noResult: true);
+    print('已保存 ${files.length} 个文件到数据库');
+  }
+  
+  static Future<List<MediaFile>> loadMediaFiles() async {
+    final db = await database;
+    final List<Map<String, dynamic>> maps = await db.query(
+      'media_files',
+      orderBy: 'lastModified DESC',
+    );
+    
+    return List.generate(maps.length, (i) => MediaFile.fromMap(maps[i]));
+  }
+  
+  static Future<bool> hasCachedFiles() async {
+    final db = await database;
+    final result = await db.rawQuery('SELECT COUNT(*) as count FROM media_files');
+    final count = Sqflite.firstIntValue(result) ?? 0;
+    return count > 0;
+  }
+  
+  static Future<DateTime?> getCacheTime() async {
+    final db = await database;
+    final result = await db.rawQuery('SELECT MAX(scanTime) as time FROM media_files');
+    final time = Sqflite.firstIntValue(result);
+    if (time != null) {
+      return DateTime.fromMillisecondsSinceEpoch(time);
+    }
+    return null;
+  }
+  
+  static Future<void> clearCache() async {
+    final db = await database;
+    await db.delete('media_files');
+    print('已清除缓存');
+  }
+}
+
+// ==================== 缩略图管理器（新增）====================
+
+class ThumbnailProvider with ChangeNotifier {
+  String _searchQuery = '';
+  Set<String> _selectedFiles = {};
+  bool _isSelectionMode = false;
+  Set<String> _selectedFolders = {};
+  bool _showFolderFilter = false;
+  
+  String get searchQuery => _searchQuery;
+  Set<String> get selectedFiles => _selectedFiles;
+  bool get isSelectionMode => _isSelectionMode;
+  Set<String> get selectedFolders => _selectedFolders;
+  bool get showFolderFilter => _showFolderFilter;
+  
+  void setSearchQuery(String query) {
+    _searchQuery = query;
+    notifyListeners();
+  }
+  
+  void toggleSelection(String filePath) {
+    if (_selectedFiles.contains(filePath)) {
+      _selectedFiles.remove(filePath);
+    } else {
+      _selectedFiles.add(filePath);
+    }
+    notifyListeners();
+  }
+  
+  void toggleSelectionMode() {
+    _isSelectionMode = !_isSelectionMode;
+    if (!_isSelectionMode) {
+      _selectedFiles.clear();
+    }
+    notifyListeners();
+  }
+  
+  void selectAll(List<MediaFile> files) {
+    _selectedFiles = files.map((f) => f.path).toSet();
+    notifyListeners();
+  }
+  
+  void clearSelection() {
+    _selectedFiles.clear();
+    _isSelectionMode = false;
+    notifyListeners();
+  }
+  
+  void toggleFolder(String folder) {
+    if (_selectedFolders.contains(folder)) {
+      _selectedFolders.remove(folder);
+    } else {
+      _selectedFolders.add(folder);
+    }
+    notifyListeners();
+  }
+  
+  void toggleFolderFilter() {
+    _showFolderFilter = !_showFolderFilter;
+    notifyListeners();
+  }
+  
+  void clearFolderFilter() {
+    _selectedFolders.clear();
+    notifyListeners();
+  }
+  
+  // 过滤文件
+  List<MediaFile> filterFiles(List<MediaFile> files) {
+    var filtered = files;
+    
+    // 搜索过滤
+    if (_searchQuery.isNotEmpty) {
+      filtered = filtered.where((file) {
+        return file.name.toLowerCase().contains(_searchQuery.toLowerCase());
+      }).toList();
+    }
+    
+    // 文件夹过滤
+    if (_selectedFolders.isNotEmpty) {
+      filtered = filtered.where((file) {
+        return _selectedFolders.contains(file.folderPath);
+      }).toList();
+    }
+    
+    return filtered;
+  }
 }
 
 // ==================== 收藏管理 ====================
@@ -111,6 +354,12 @@ class FavoritesProvider with ChangeNotifier {
     } else {
       _favorites.add(path);
     }
+    await _prefs?.setStringList('favorites', _favorites.toList());
+    notifyListeners();
+  }
+  
+  Future<void> addMultipleFavorites(Set<String> paths) async {
+    _favorites.addAll(paths);
     await _prefs?.setStringList('favorites', _favorites.toList());
     notifyListeners();
   }
@@ -201,7 +450,7 @@ class MusicProvider with ChangeNotifier {
   }
 }
 
-// ==================== 增强型媒体扫描器 ====================
+// ==================== 媒体扫描器 ====================
 
 class MediaScanner {
   static const imageExts = [
@@ -212,19 +461,9 @@ class MediaScanner {
   
   static const videoExts = ['mp4', 'avi', 'mov', 'mkv', '3gp', 'webm', 'flv'];
   
-  // 需要跳过的系统目录
   static const skipDirs = [
-    'Android',
-    '.thumbnails',
-    'thumbnails',
-    'cache',
-    '.cache',
-    'temp',
-    '.temp',
-    'system',
-    '.system',
-    'data',
-    'obb',
+    'Android', '.thumbnails', 'thumbnails', 'cache', '.cache',
+    'temp', '.temp', 'system', '.system', 'data', 'obb',
   ];
   
   int _scannedCount = 0;
@@ -232,13 +471,11 @@ class MediaScanner {
   
   MediaScanner({this.onProgress});
   
-  // 扫描指定目录
   Future<List<MediaFile>> scanDirectory(String dirPath) async {
     final mediaFiles = <MediaFile>[];
     final directory = Directory(dirPath);
     
     if (!await directory.exists()) {
-      print('目录不存在: $dirPath');
       return mediaFiles;
     }
     
@@ -246,57 +483,39 @@ class MediaScanner {
     
     try {
       await _scanRecursively(directory, mediaFiles, 0);
-      print('扫描完成，共找到 ${mediaFiles.length} 个媒体文件');
-    } catch (e, stackTrace) {
+    } catch (e) {
       print('扫描错误: $e');
-      print('堆栈: $stackTrace');
     }
     
-    _sortFiles(mediaFiles);
     return mediaFiles;
   }
   
-  // 扫描整个设备的所有图片（核心功能）
   Future<List<MediaFile>> scanAllImages() async {
-    print('========== 开始扫描整个设备 ==========');
-    
     final allMediaFiles = <MediaFile>[];
-    
-    // 从根存储目录开始扫描
     final rootPath = '/storage/emulated/0';
     final rootDir = Directory(rootPath);
     
     if (!await rootDir.exists()) {
-      print('根目录不存在');
       return allMediaFiles;
     }
     
     try {
-      // 分批扫描，每批最多处理200个文件
       await _scanInBatches(rootDir, allMediaFiles);
-      
-      print('========== 扫描完成 ==========');
-      print('总共找到 ${allMediaFiles.length} 个媒体文件');
-      
-    } catch (e, stackTrace) {
+    } catch (e) {
       print('扫描失败: $e');
-      print('堆栈: $stackTrace');
     }
     
-    // 去重
     final uniqueFiles = <String, MediaFile>{};
     for (var file in allMediaFiles) {
       uniqueFiles[file.path] = file;
     }
     
     final result = uniqueFiles.values.toList();
-    print('去重后: ${result.length} 个文件');
+    result.sort((a, b) => b.lastModified.compareTo(a.lastModified));
     
-    _sortFiles(result);
     return result;
   }
   
-  // 分批扫描，避免内存溢出
   Future<void> _scanInBatches(Directory rootDir, List<MediaFile> result) async {
     final queue = <Directory>[rootDir];
     int batchCount = 0;
@@ -305,36 +524,26 @@ class MediaScanner {
       final currentDir = queue.removeAt(0);
       final dirName = path.basename(currentDir.path);
       
-      // 跳过系统目录
-      if (_shouldSkipDirectory(dirName)) {
-        continue;
-      }
+      if (_shouldSkipDirectory(dirName)) continue;
       
-      print('扫描目录: ${currentDir.path}');
       onProgress?.call(result.length, currentDir.path);
       
       try {
-        // 设置超时，避免卡死
         final entities = await currentDir.list().toList().timeout(
           const Duration(seconds: 10),
-          onTimeout: () {
-            print('列出目录超时: ${currentDir.path}');
-            return [];
-          },
+          onTimeout: () => [],
         );
         
         for (var entity in entities) {
           try {
             if (entity is Directory) {
-              // 添加到队列，稍后处理
               queue.add(entity);
             } else if (entity is File) {
               _scannedCount++;
               
-              // 每处理20个文件，暂停一下让UI更新
-              if (_scannedCount % 20 == 0) {
+              if (_scannedCount % 50 == 0) {
                 onProgress?.call(result.length, currentDir.path);
-                await Future.delayed(const Duration(milliseconds: 10));
+                await Future.delayed(const Duration(milliseconds: 5));
               }
               
               final mediaFile = await _processFileFast(entity);
@@ -343,31 +552,23 @@ class MediaScanner {
               }
             }
           } catch (e) {
-            // 跳过有问题的文件/目录
             continue;
           }
         }
         
-        // 每扫描完一个目录，检查是否需要暂停
         batchCount++;
-        if (batchCount % 10 == 0) {
-          await Future.delayed(const Duration(milliseconds: 50));
+        if (batchCount % 20 == 0) {
+          await Future.delayed(const Duration(milliseconds: 20));
         }
         
       } catch (e) {
-        print('扫描目录失败: ${currentDir.path}, 错误: $e');
         continue;
       }
     }
   }
   
-  // 递归扫描（用于单个文件夹）
   Future<void> _scanRecursively(Directory folder, List<MediaFile> result, int depth) async {
-    // 限制递归深度，避免栈溢出
-    if (depth > 10) {
-      print('递归深度超限，停止扫描: ${folder.path}');
-      return;
-    }
+    if (depth > 10) return;
     
     try {
       final entities = await folder.list().toList().timeout(
@@ -384,9 +585,9 @@ class MediaScanner {
             }
           } else if (entity is File) {
             _scannedCount++;
-            if (_scannedCount % 20 == 0) {
+            if (_scannedCount % 50 == 0) {
               onProgress?.call(result.length, folder.path);
-              await Future.delayed(const Duration(milliseconds: 10));
+              await Future.delayed(const Duration(milliseconds: 5));
             }
             
             final mediaFile = await _processFileFast(entity);
@@ -399,16 +600,13 @@ class MediaScanner {
         }
       }
     } catch (e) {
-      print('扫描目录失败: ${folder.path}');
+      // 忽略错误
     }
   }
   
-  // 判断是否应该跳过目录
   bool _shouldSkipDirectory(String dirName) {
-    // 跳过隐藏目录
     if (dirName.startsWith('.')) return true;
     
-    // 跳过系统目录
     final lowerName = dirName.toLowerCase();
     for (var skipDir in skipDirs) {
       if (lowerName == skipDir.toLowerCase()) return true;
@@ -417,7 +615,6 @@ class MediaScanner {
     return false;
   }
   
-  // 快速处理文件（不获取视频时长，提高速度）
   Future<MediaFile?> _processFileFast(File file) async {
     try {
       final ext = path.extension(file.path).toLowerCase().replaceAll('.', '');
@@ -425,10 +622,9 @@ class MediaScanner {
       
       final fileName = path.basename(file.path);
       
-      // 跳过太小的文件
       try {
         final fileSize = await file.length().timeout(
-          const Duration(seconds: 1),
+          const Duration(milliseconds: 500),
           onTimeout: () => 0,
         );
         if (fileSize < 1024) return null;
@@ -436,40 +632,29 @@ class MediaScanner {
         return null;
       }
       
+      final stat = await file.stat();
+      final lastModified = stat.modified.millisecondsSinceEpoch;
+      
       if (imageExts.contains(ext)) {
         return MediaFile(
-          file: file,
+          path: file.path,
           type: MediaType.image,
           name: fileName,
+          lastModified: lastModified,
         );
       } else if (videoExts.contains(ext)) {
-        // 暂时不获取视频时长，加快扫描速度
         return MediaFile(
-          file: file,
+          path: file.path,
           type: MediaType.video,
           name: fileName,
-          duration: 60, // 默认时长
+          duration: 60,
+          lastModified: lastModified,
         );
       }
     } catch (e) {
       return null;
     }
     return null;
-  }
-  
-  // 排序文件
-  void _sortFiles(List<MediaFile> files) {
-    try {
-      files.sort((a, b) {
-        try {
-          return b.file.lastModifiedSync().compareTo(a.file.lastModifiedSync());
-        } catch (e) {
-          return 0;
-        }
-      });
-    } catch (e) {
-      print('排序失败: $e');
-    }
   }
 }
 
@@ -486,6 +671,7 @@ class PlayerProvider with ChangeNotifier {
   String _currentScanPath = '';
   TransitionEffect _transitionEffect = TransitionEffect.fade;
   bool _showOnlyFavorites = false;
+  SortType _sortType = SortType.timeNewest;
   
   List<MediaFile> get mediaFiles => _mediaFiles;
   MediaFile? get currentMedia => _mediaFiles.isEmpty ? null : _mediaFiles[_currentIndex];
@@ -498,9 +684,11 @@ class PlayerProvider with ChangeNotifier {
   String get currentScanPath => _currentScanPath;
   TransitionEffect get transitionEffect => _transitionEffect;
   bool get showOnlyFavorites => _showOnlyFavorites;
+  SortType get sortType => _sortType;
   
   PlayerProvider() {
     _loadSettings();
+    _loadCachedFiles();
   }
   
   Future<void> _loadSettings() async {
@@ -508,7 +696,23 @@ class PlayerProvider with ChangeNotifier {
     _imageDuration = prefs.getInt('image_duration') ?? 5;
     final effectIndex = prefs.getInt('transition_effect') ?? 0;
     _transitionEffect = TransitionEffect.values[effectIndex];
+    final sortIndex = prefs.getInt('sort_type') ?? 0;
+    _sortType = SortType.values[sortIndex];
     notifyListeners();
+  }
+  
+  Future<void> _loadCachedFiles() async {
+    try {
+      final hasCache = await MediaDatabase.hasCachedFiles();
+      if (hasCache) {
+        _mediaFiles = await MediaDatabase.loadMediaFiles();
+        if (_mediaFiles.isNotEmpty) {
+          notifyListeners();
+        }
+      }
+    } catch (e) {
+      print('加载缓存失败: $e');
+    }
   }
   
   Future<void> loadDirectory(String dirPath) async {
@@ -529,14 +733,13 @@ class PlayerProvider with ChangeNotifier {
       _mediaFiles = await scanner.scanDirectory(dirPath);
       _currentIndex = 0;
       
-      print('加载完成，共 ${_mediaFiles.length} 个文件');
+      await MediaDatabase.saveMediaFiles(_mediaFiles);
       
       if (_mediaFiles.isNotEmpty) {
         play();
       }
-    } catch (e, stackTrace) {
+    } catch (e) {
       print('加载失败: $e');
-      print('堆栈: $stackTrace');
     } finally {
       _isLoading = false;
       _currentScanPath = '';
@@ -544,7 +747,6 @@ class PlayerProvider with ChangeNotifier {
     }
   }
   
-  // 扫描整个设备的所有图片
   Future<void> loadAllImages() async {
     _isLoading = true;
     _scannedCount = 0;
@@ -552,8 +754,6 @@ class PlayerProvider with ChangeNotifier {
     notifyListeners();
     
     try {
-      print('开始扫描整个设备的所有图片...');
-      
       final scanner = MediaScanner(
         onProgress: (count, currentPath) {
           _scannedCount = count;
@@ -562,33 +762,102 @@ class PlayerProvider with ChangeNotifier {
         },
       );
       
-      // 使用超时保护，最多扫描5分钟
       _mediaFiles = await scanner.scanAllImages().timeout(
-        const Duration(minutes: 5),
-        onTimeout: () {
-          print('扫描超时，返回已扫描的文件');
-          return <MediaFile>[];
-        },
+        const Duration(minutes: 10),
+        onTimeout: () => <MediaFile>[],
       );
       
       _currentIndex = 0;
       
-      print('扫描完成，共 ${_mediaFiles.length} 个文件');
-      
       if (_mediaFiles.isNotEmpty) {
+        await MediaDatabase.saveMediaFiles(_mediaFiles);
         play();
-      } else {
-        print('未找到任何媒体文件');
       }
-    } catch (e, stackTrace) {
-      print('扫描全部图片失败: $e');
-      print('堆栈: $stackTrace');
+    } catch (e) {
+      print('扫描失败: $e');
       _mediaFiles = [];
     } finally {
       _isLoading = false;
       _currentScanPath = '';
       notifyListeners();
     }
+  }
+  
+  Future<void> rescan() async {
+    await MediaDatabase.clearCache();
+    await loadAllImages();
+  }
+  
+  List<MediaFile> getSortedFiles() {
+    final files = List<MediaFile>.from(_mediaFiles);
+    
+    switch (_sortType) {
+      case SortType.timeNewest:
+        files.sort((a, b) => b.lastModified.compareTo(a.lastModified));
+        break;
+      case SortType.timeOldest:
+        files.sort((a, b) => a.lastModified.compareTo(b.lastModified));
+        break;
+      case SortType.folder:
+        files.sort((a, b) {
+          final folderCompare = a.folderPath.compareTo(b.folderPath);
+          if (folderCompare != 0) return folderCompare;
+          return b.lastModified.compareTo(a.lastModified);
+        });
+        break;
+      case SortType.dateGroup:
+        files.sort((a, b) => b.lastModified.compareTo(a.lastModified));
+        break;
+    }
+    
+    return files;
+  }
+  
+  Map<String, List<MediaFile>> getFilesByFolder() {
+    final Map<String, List<MediaFile>> folderMap = {};
+    
+    for (var file in _mediaFiles) {
+      final folder = file.folderPath;
+      if (!folderMap.containsKey(folder)) {
+        folderMap[folder] = [];
+      }
+      folderMap[folder]!.add(file);
+    }
+    
+    folderMap.forEach((key, value) {
+      value.sort((a, b) => b.lastModified.compareTo(a.lastModified));
+    });
+    
+    return folderMap;
+  }
+  
+  Map<String, List<MediaFile>> getFilesByDateGroup() {
+    final Map<String, List<MediaFile>> dateMap = {};
+    
+    for (var file in _mediaFiles) {
+      final group = file.dateGroupLabel;
+      if (!dateMap.containsKey(group)) {
+        dateMap[group] = [];
+      }
+      dateMap[group]!.add(file);
+    }
+    
+    dateMap.forEach((key, value) {
+      value.sort((a, b) => b.lastModified.compareTo(a.lastModified));
+    });
+    
+    return dateMap;
+  }
+  
+  Set<String> getAllFolders() {
+    return _mediaFiles.map((f) => f.folderPath).toSet();
+  }
+  
+  Future<void> setSortType(SortType type) async {
+    _sortType = type;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('sort_type', type.index);
+    notifyListeners();
   }
   
   void toggleFavoritesFilter(Set<String> favorites) {
@@ -680,7 +949,6 @@ class PlayerProvider with ChangeNotifier {
 }
 
 // ==================== 主界面 ====================
-// （HomeScreen 和其他UI代码保持不变，使用之前提供的完整版本）
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
@@ -693,6 +961,23 @@ class _HomeScreenState extends State<HomeScreen> {
   VideoPlayerController? _videoController;
   MediaFile? _currentDisplayedMedia;
   bool _showThumbnails = false;
+  final TransformationController _transformationController = TransformationController();
+  final TextEditingController _searchController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    WakelockPlus.enable();
+  }
+
+  @override
+  void dispose() {
+    _videoController?.dispose();
+    _transformationController.dispose();
+    _searchController.dispose();
+    WakelockPlus.disable();
+    super.dispose();
+  }
 
   Future<void> _selectFolder() async {
     try {
@@ -701,7 +986,6 @@ class _HomeScreenState extends State<HomeScreen> {
         await context.read<PlayerProvider>().loadDirectory(dir);
       }
     } catch (e) {
-      print('选择文件夹失败: $e');
       if (mounted) {
         _showSnackBar('选择文件夹失败: $e', Colors.red);
       }
@@ -709,14 +993,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
   
   Future<void> _scanAllImages() async {
-    // 显示确认对话框
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('扫描整个设备'),
         content: const Text(
           '这将扫描平板上所有文件夹中的图片和视频。\n\n'
-          '扫描可能需要几分钟时间，期间请不要关闭应用。\n\n'
+          '扫描可能需要几分钟时间，扫描结果会自动保存。\n\n'
           '确定要继续吗？',
         ),
         actions: [
@@ -736,7 +1019,6 @@ class _HomeScreenState extends State<HomeScreen> {
       try {
         await context.read<PlayerProvider>().loadAllImages();
       } catch (e) {
-        print('扫描全部图片失败: $e');
         if (mounted) {
           _showSnackBar('扫描失败: $e', Colors.red);
         }
@@ -758,58 +1040,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Consumer3<PlayerProvider, FavoritesProvider, MusicProvider>(
-        builder: (context, player, favorites, music, child) {
+      body: Consumer4<PlayerProvider, FavoritesProvider, MusicProvider, ThumbnailProvider>(
+        builder: (context, player, favorites, music, thumbnail, child) {
           if (player.isLoading) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const SizedBox(
-                    width: 80,
-                    height: 80,
-                    child: CircularProgressIndicator(
-                      color: Colors.white,
-                      strokeWidth: 6,
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-                  Text(
-                    '正在扫描文件...',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    '已找到: ${player.scannedCount} 个文件',
-                    style: const TextStyle(color: Colors.white70, fontSize: 18),
-                  ),
-                  const SizedBox(height: 8),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 40),
-                    child: Text(
-                      player.currentScanPath,
-                      style: const TextStyle(color: Colors.white54, fontSize: 14),
-                      textAlign: TextAlign.center,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-                  const Text(
-                    '请耐心等待，不要关闭应用',
-                    style: TextStyle(color: Colors.orange, fontSize: 16),
-                  ),
-                ],
-              ),
-            );
+            return _buildLoadingScreen(player);
           }
 
           if (player.mediaFiles.isEmpty) {
-            return _buildWelcomeScreen();
+            return _buildWelcomeScreen(player);
           }
 
           return Stack(
@@ -819,7 +1057,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               
               if (_showThumbnails)
-                _buildThumbnailGrid(player, favorites),
+                _buildThumbnailGrid(player, favorites, thumbnail),
               
               Positioned(
                 bottom: 0,
@@ -852,75 +1090,206 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildWelcomeScreen() {
+  Widget _buildLoadingScreen(PlayerProvider player) {
     return Center(
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.photo_library_outlined, size: 100, color: Colors.white54),
-            const SizedBox(height: 32),
-            const Text(
-              '欢迎使用相册播放器 Pro',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 28,
-                fontWeight: FontWeight.bold,
-              ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const SizedBox(
+            width: 80,
+            height: 80,
+            child: CircularProgressIndicator(
+              color: Colors.white,
+              strokeWidth: 6,
             ),
-            const SizedBox(height: 16),
-            const Text(
-              '功能强大的照片和视频播放器',
-              style: TextStyle(color: Colors.white70, fontSize: 16),
+          ),
+          const SizedBox(height: 32),
+          const Text(
+            '正在扫描文件...',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
             ),
-            const SizedBox(height: 48),
-            
-            ElevatedButton.icon(
-              onPressed: _selectFolder,
-              icon: const Icon(Icons.folder_open, size: 32),
-              label: const Text('选择文件夹', style: TextStyle(fontSize: 20)),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 24),
-                backgroundColor: Colors.blue,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-              ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '已找到: ${player.scannedCount} 个文件',
+            style: const TextStyle(color: Colors.white70, fontSize: 18),
+          ),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40),
+            child: Text(
+              player.currentScanPath,
+              style: const TextStyle(color: Colors.white54, fontSize: 14),
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
-            
-            const SizedBox(height: 20),
-            
-            ElevatedButton.icon(
-              onPressed: _scanAllImages,
-              icon: const Icon(Icons.search, size: 32),
-              label: const Text('扫描整个设备', style: TextStyle(fontSize: 20)),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 24),
-                backgroundColor: Colors.green,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-              ),
-            ),
-            
-            const SizedBox(height: 16),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 40),
-              child: Text(
-                '提示：扫描整个设备可能需要几分钟时间',
-                style: TextStyle(color: Colors.white54, fontSize: 14),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 32),
+          const Text(
+            '请耐心等待，不要关闭应用',
+            style: TextStyle(color: Colors.orange, fontSize: 16),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            '扫描结果会自动保存',
+            style: TextStyle(color: Colors.green, fontSize: 14),
+          ),
+        ],
       ),
     );
   }
 
-  // 其余的UI方法保持不变（使用之前提供的完整版本）
-  // _buildMediaDisplay, _buildImageViewer, _buildVideoPlayer, 
-  // _buildThumbnailGrid, _buildFavoriteButton, _buildShareButton, 
-  // _buildThumbnailToggle, _buildControls, _showSettings 等方法
-  
+  Widget _buildWelcomeScreen(PlayerProvider player) {
+    return FutureBuilder<bool>(
+      future: MediaDatabase.hasCachedFiles(),
+      builder: (context, snapshot) {
+        final hasCache = snapshot.data ?? false;
+        
+        return Center(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.photo_library_outlined, size: 100, color: Colors.white54),
+                const SizedBox(height: 32),
+                const Text(
+                  '欢迎使用相册播放器 Pro',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  '功能强大的照片和视频播放器',
+                  style: TextStyle(color: Colors.white70, fontSize: 16),
+                ),
+                
+                if (hasCache)
+                  FutureBuilder<DateTime?>(
+                    future: MediaDatabase.getCacheTime(),
+                    builder: (context, snapshot) {
+                      if (snapshot.hasData && snapshot.data != null) {
+                        final cacheTime = snapshot.data!;
+                        final diff = DateTime.now().difference(cacheTime);
+                        String timeAgo;
+                        if (diff.inDays > 0) {
+                          timeAgo = '${diff.inDays}天前';
+                        } else if (diff.inHours > 0) {
+                          timeAgo = '${diff.inHours}小时前';
+                        } else {
+                          timeAgo = '${diff.inMinutes}分钟前';
+                        }
+                        
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 16),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                            decoration: BoxDecoration(
+                              color: Colors.green.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: Colors.green),
+                            ),
+                            child: Column(
+                              children: [
+                                const Icon(Icons.check_circle, color: Colors.green, size: 32),
+                                const SizedBox(height: 8),
+                                const Text(
+                                  '已有缓存数据',
+                                  style: TextStyle(color: Colors.green, fontSize: 16, fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  '上次扫描: $timeAgo',
+                                  style: const TextStyle(color: Colors.white70, fontSize: 14),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      }
+                      return const SizedBox.shrink();
+                    },
+                  ),
+                
+                const SizedBox(height: 48),
+                
+                ElevatedButton.icon(
+                  onPressed: _selectFolder,
+                  icon: const Icon(Icons.folder_open, size: 32),
+                  label: const Text('选择文件夹', style: TextStyle(fontSize: 20)),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 24),
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                  ),
+                ),
+                
+                const SizedBox(height: 20),
+                
+                if (hasCache)
+                  ElevatedButton.icon(
+                    onPressed: () async {
+                      final files = await MediaDatabase.loadMediaFiles();
+                      if (files.isNotEmpty && mounted) {
+                        context.read<PlayerProvider>()._mediaFiles = files;
+                        context.read<PlayerProvider>().notifyListeners();
+                        context.read<PlayerProvider>().play();
+                      }
+                    },
+                    icon: const Icon(Icons.history, size: 32),
+                    label: const Text('加载缓存', style: TextStyle(fontSize: 20)),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 24),
+                      backgroundColor: Colors.purple,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                    ),
+                  ),
+                
+                if (hasCache)
+                  const SizedBox(height: 20),
+                
+                ElevatedButton.icon(
+                  onPressed: _scanAllImages,
+                  icon: const Icon(Icons.search, size: 32),
+                  label: Text(
+                    hasCache ? '重新扫描设备' : '扫描整个设备',
+                    style: const TextStyle(fontSize: 20),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 24),
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                  ),
+                ),
+                
+                const SizedBox(height: 16),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 40),
+                  child: Text(
+                    hasCache 
+                        ? '提示：可以直接加载缓存，或重新扫描更新文件列表'
+                        : '提示：扫描整个设备可能需要几分钟时间',
+                    style: const TextStyle(color: Colors.white54, fontSize: 14),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildMediaDisplay(PlayerProvider player) {
     final media = player.currentMedia!;
     
@@ -1027,116 +1396,728 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Widget _buildThumbnailGrid(PlayerProvider player, FavoritesProvider favorites) {
+  // 缩略图网格 - 完整实现
+  Widget _buildThumbnailGrid(PlayerProvider player, FavoritesProvider favorites, ThumbnailProvider thumbnail) {
     return Container(
-      color: Colors.black.withOpacity(0.9),
+      color: Colors.black.withOpacity(0.95),
       child: Column(
         children: [
-          Container(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                const Text(
-                  '缩略图预览',
-                  style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
-                ),
-                const Spacer(),
+          _buildThumbnailHeader(player, favorites, thumbnail),
+          
+          if (thumbnail.showFolderFilter)
+            _buildFolderFilter(player, thumbnail),
+          
+          Expanded(
+            child: _buildThumbnailContent(player, favorites, thumbnail),
+          ),
+          
+          if (thumbnail.isSelectionMode)
+            _buildSelectionToolbar(player, favorites, thumbnail),
+        ],
+      ),
+    );
+  }
+
+  // 缩略图头部
+  Widget _buildThumbnailHeader(PlayerProvider player, FavoritesProvider favorites, ThumbnailProvider thumbnail) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.9),
+        border: const Border(bottom: BorderSide(color: Colors.white24, width: 1)),
+      ),
+      child: Column(
+        children: [
+          // 第一行：标题和操作按钮
+          Row(
+            children: [
+              if (thumbnail.isSelectionMode)
                 IconButton(
                   icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () {
-                    setState(() {
-                      _showThumbnails = false;
-                    });
-                  },
+                  onPressed: () => thumbnail.clearSelection(),
+                )
+              else
+                const Text(
+                  '缩略图',
+                  style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
                 ),
+              
+              if (thumbnail.isSelectionMode)
+                Text(
+                  '已选择 ${thumbnail.selectedFiles.length}',
+                  style: const TextStyle(color: Colors.white, fontSize: 18),
+                ),
+              
+              const Spacer(),
+              
+              if (!thumbnail.isSelectionMode) ...[
+                IconButton(
+                  icon: Icon(
+                    thumbnail.showFolderFilter ? Icons.filter_list : Icons.filter_list_off,
+                    color: Colors.white70,
+                    size: 20,
+                  ),
+                  onPressed: () => thumbnail.toggleFolderFilter(),
+                  tooltip: '文件夹筛选',
+                ),
+                IconButton(
+                  icon: const Icon(Icons.checklist, color: Colors.white70, size: 20),
+                  onPressed: () => thumbnail.toggleSelectionMode(),
+                  tooltip: '批量选择',
+                ),
+                IconButton(
+                  icon: const Icon(Icons.zoom_out_map, color: Colors.white70, size: 20),
+                  onPressed: () {
+                    _transformationController.value = Matrix4.identity();
+                  },
+                  tooltip: '重置缩放',
+                ),
+              ],
+              
+              IconButton(
+                icon: const Icon(Icons.close, color: Colors.white, size: 24),
+                onPressed: () {
+                  setState(() {
+                    _showThumbnails = false;
+                    _transformationController.value = Matrix4.identity();
+                  });
+                  thumbnail.clearSelection();
+                  thumbnail.setSearchQuery('');
+                },
+              ),
+            ],
+          ),
+          
+          const SizedBox(height: 12),
+          
+          // 第二行：搜索框
+          TextField(
+            controller: _searchController,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: '搜索文件名...',
+              hintStyle: const TextStyle(color: Colors.white54),
+              prefixIcon: const Icon(Icons.search, color: Colors.white70),
+              suffixIcon: _searchController.text.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear, color: Colors.white70),
+                      onPressed: () {
+                        _searchController.clear();
+                        thumbnail.setSearchQuery('');
+                      },
+                    )
+                  : null,
+              filled: true,
+              fillColor: Colors.white.withOpacity(0.1),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(25),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            ),
+            onChanged: (value) => thumbnail.setSearchQuery(value),
+          ),
+          
+          const SizedBox(height: 12),
+          
+          // 第三行：排序选项
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                const Icon(Icons.sort, color: Colors.white70, size: 18),
+                const SizedBox(width: 8),
+                _buildSortButton(player, SortType.timeNewest, '最新', Icons.access_time),
+                const SizedBox(width: 6),
+                _buildSortButton(player, SortType.timeOldest, '最旧', Icons.history),
+                const SizedBox(width: 6),
+                _buildSortButton(player, SortType.folder, '文件夹', Icons.folder),
+                const SizedBox(width: 6),
+                _buildSortButton(player, SortType.dateGroup, '日期', Icons.calendar_today),
               ],
             ),
           ),
-          
-          Expanded(
-            child: GridView.builder(
-              padding: const EdgeInsets.all(8),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 4,
-                crossAxisSpacing: 8,
-                mainAxisSpacing: 8,
-                childAspectRatio: 1.0,
+        ],
+      ),
+    );
+  }
+
+  // 文件夹筛选器
+  Widget _buildFolderFilter(PlayerProvider player, ThumbnailProvider thumbnail) {
+    final folders = player.getAllFolders().toList()..sort();
+    
+    return Container(
+      height: 60,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.blue.withOpacity(0.1),
+        border: const Border(bottom: BorderSide(color: Colors.blue, width: 1)),
+      ),
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        itemCount: folders.length + 1,
+        itemBuilder: (context, index) {
+          if (index == 0) {
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilterChip(
+                label: const Text('全部'),
+                selected: thumbnail.selectedFolders.isEmpty,
+                onSelected: (_) => thumbnail.clearFolderFilter(),
+                selectedColor: Colors.blue,
+                backgroundColor: Colors.white.withOpacity(0.1),
               ),
-              itemCount: player.mediaFiles.length,
-              itemBuilder: (context, index) {
-                final media = player.mediaFiles[index];
-                final isCurrent = index == player.currentIndex;
-                final isFavorite = favorites.isFavorite(media.path);
-                
-                return GestureDetector(
-                  onTap: () {
-                    player.jumpToIndex(index);
-                    setState(() {
-                      _showThumbnails = false;
-                    });
-                  },
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      Container(
-                        decoration: BoxDecoration(
-                          border: Border.all(
-                            color: isCurrent ? Colors.blue : Colors.transparent,
-                            width: 3,
+            );
+          }
+          
+          final folder = folders[index - 1];
+          final folderName = folder.substring(folder.lastIndexOf('/') + 1);
+          final isSelected = thumbnail.selectedFolders.contains(folder);
+          
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: FilterChip(
+              label: Text(folderName),
+              selected: isSelected,
+              onSelected: (_) => thumbnail.toggleFolder(folder),
+              selectedColor: Colors.blue,
+              backgroundColor: Colors.white.withOpacity(0.1),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // 缩略图内容
+  Widget _buildThumbnailContent(PlayerProvider player, FavoritesProvider favorites, ThumbnailProvider thumbnail) {
+    var files = thumbnail.filterFiles(player.mediaFiles);
+    
+    if (files.isEmpty) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.search_off, size: 64, color: Colors.white54),
+            SizedBox(height: 16),
+            Text(
+              '没有找到匹配的文件',
+              style: TextStyle(color: Colors.white70, fontSize: 16),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    switch (player.sortType) {
+      case SortType.folder:
+        return _buildFolderGroupedGrid(files, player, favorites, thumbnail);
+      case SortType.dateGroup:
+        return _buildDateGroupedGrid(files, player, favorites, thumbnail);
+      default:
+        return _buildTimeBasedGrid(files, player, favorites, thumbnail);
+    }
+  }
+
+  // 排序按钮
+  Widget _buildSortButton(PlayerProvider player, SortType type, String label, IconData icon) {
+    final isSelected = player.sortType == type;
+    
+    return GestureDetector(
+      onTap: () => player.setSortType(type),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.blue : Colors.white.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isSelected ? Colors.blue : Colors.white24,
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: isSelected ? Colors.white : Colors.white70, size: 14),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: isSelected ? Colors.white : Colors.white70,
+                fontSize: 12,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 按时间排序的网格
+  Widget _buildTimeBasedGrid(List<MediaFile> files, PlayerProvider player, FavoritesProvider favorites, ThumbnailProvider thumbnail) {
+    final sortedFiles = List<MediaFile>.from(files);
+    
+    if (player.sortType == SortType.timeNewest) {
+      sortedFiles.sort((a, b) => b.lastModified.compareTo(a.lastModified));
+    } else {
+      sortedFiles.sort((a, b) => a.lastModified.compareTo(b.lastModified));
+    }
+    
+    return InteractiveViewer(
+      transformationController: _transformationController,
+      minScale: 0.5,
+      maxScale: 4.0,
+      boundaryMargin: const EdgeInsets.all(double.infinity),
+      child: GridView.builder(
+        padding: const EdgeInsets.all(8),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 4,
+          crossAxisSpacing: 8,
+          mainAxisSpacing: 8,
+          childAspectRatio: 1.0,
+        ),
+        itemCount: sortedFiles.length,
+        itemBuilder: (context, index) {
+          final media = sortedFiles[index];
+          final originalIndex = player.mediaFiles.indexOf(media);
+          final isCurrent = originalIndex == player.currentIndex;
+          final isFavorite = favorites.isFavorite(media.path);
+          final isSelected = thumbnail.selectedFiles.contains(media.path);
+          
+          return _buildThumbnailItem(
+            media,
+            originalIndex,
+            isCurrent,
+            isFavorite,
+            isSelected,
+            player,
+            thumbnail,
+          );
+        },
+      ),
+    );
+  }
+
+  // 按文件夹分组的网格
+  Widget _buildFolderGroupedGrid(List<MediaFile> files, PlayerProvider player, FavoritesProvider favorites, ThumbnailProvider thumbnail) {
+    final folderMap = <String, List<MediaFile>>{};
+    
+    for (var file in files) {
+      final folder = file.folderPath;
+      if (!folderMap.containsKey(folder)) {
+        folderMap[folder] = [];
+      }
+      folderMap[folder]!.add(file);
+    }
+    
+    folderMap.forEach((key, value) {
+      value.sort((a, b) => b.lastModified.compareTo(a.lastModified));
+    });
+    
+    final folders = folderMap.keys.toList()..sort();
+    
+    return InteractiveViewer(
+      transformationController: _transformationController,
+      minScale: 0.5,
+      maxScale: 4.0,
+      boundaryMargin: const EdgeInsets.all(double.infinity),
+      child: ListView.builder(
+        padding: const EdgeInsets.all(8),
+        itemCount: folders.length,
+        itemBuilder: (context, folderIndex) {
+          final folder = folders[folderIndex];
+          final folderFiles = folderMap[folder]!;
+          final folderName = folder.substring(folder.lastIndexOf('/') + 1);
+          
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                margin: EdgeInsets.only(top: folderIndex == 0 ? 0 : 16, bottom: 8),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blue.withOpacity(0.5)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.folder, color: Colors.blue, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            folderName,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: media.isImage
-                              ? Image.file(
-                                  media.file,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (context, error, stackTrace) {
-                                    return const Icon(Icons.broken_image, color: Colors.grey);
-                                  },
-                                )
-                              : Container(
-                                  color: Colors.grey[800],
-                                  child: const Icon(Icons.play_circle_outline, color: Colors.white, size: 40),
-                                ),
+                          Text(
+                            folder,
+                            style: const TextStyle(color: Colors.white54, fontSize: 10),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.blue,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '${folderFiles.length}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
-                      
-                      if (isFavorite)
-                        Positioned(
-                          top: 4,
-                          right: 4,
-                          child: Container(
-                            padding: const EdgeInsets.all(4),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.6),
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(Icons.favorite, color: Colors.red, size: 16),
-                          ),
+                    ),
+                  ],
+                ),
+              ),
+              
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 4,
+                  crossAxisSpacing: 8,
+                  mainAxisSpacing: 8,
+                  childAspectRatio: 1.0,
+                ),
+                itemCount: folderFiles.length,
+                itemBuilder: (context, index) {
+                  final media = folderFiles[index];
+                  final originalIndex = player.mediaFiles.indexOf(media);
+                  final isCurrent = originalIndex == player.currentIndex;
+                  final isFavorite = favorites.isFavorite(media.path);
+                  final isSelected = thumbnail.selectedFiles.contains(media.path);
+                  
+                  return _buildThumbnailItem(
+                    media,
+                    originalIndex,
+                    isCurrent,
+                    isFavorite,
+                    isSelected,
+                    player,
+                    thumbnail,
+                  );
+                },
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // 按日期分组的网格
+  Widget _buildDateGroupedGrid(List<MediaFile> files, PlayerProvider player, FavoritesProvider favorites, ThumbnailProvider thumbnail) {
+    final dateMap = <String, List<MediaFile>>{};
+    
+    for (var file in files) {
+      final group = file.dateGroupLabel;
+      if (!dateMap.containsKey(group)) {
+        dateMap[group] = [];
+      }
+      dateMap[group]!.add(file);
+    }
+    
+    dateMap.forEach((key, value) {
+      value.sort((a, b) => b.lastModified.compareTo(a.lastModified));
+    });
+    
+    final groups = ['今天', '昨天', '本周', '本月'];
+    final sortedGroups = dateMap.keys.toList()..sort((a, b) {
+      final aIndex = groups.indexOf(a);
+      final bIndex = groups.indexOf(b);
+      if (aIndex != -1 && bIndex != -1) return aIndex.compareTo(bIndex);
+      if (aIndex != -1) return -1;
+      if (bIndex != -1) return 1;
+      return b.compareTo(a);
+    });
+    
+    return InteractiveViewer(
+      transformationController: _transformationController,
+      minScale: 0.5,
+      maxScale: 4.0,
+      boundaryMargin: const EdgeInsets.all(double.infinity),
+      child: ListView.builder(
+        padding: const EdgeInsets.all(8),
+        itemCount: sortedGroups.length,
+        itemBuilder: (context, groupIndex) {
+          final group = sortedGroups[groupIndex];
+          final groupFiles = dateMap[group]!;
+          
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                margin: EdgeInsets.only(top: groupIndex == 0 ? 0 : 16, bottom: 8),
+                decoration: BoxDecoration(
+                  color: Colors.green.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.green.withOpacity(0.5)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.calendar_today, color: Colors.green, size: 18),
+                    const SizedBox(width: 8),
+                    Text(
+                      group,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const Spacer(),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.green,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '${groupFiles.length}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
                         ),
-                      
-                      if (isCurrent)
-                        Positioned(
-                          bottom: 4,
-                          left: 4,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: Colors.blue,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: const Text(
-                              '播放中',
-                              style: TextStyle(color: Colors.white, fontSize: 10),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                );
-              },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 4,
+                  crossAxisSpacing: 8,
+                  mainAxisSpacing: 8,
+                  childAspectRatio: 1.0,
+                ),
+                itemCount: groupFiles.length,
+                itemBuilder: (context, index) {
+                  final media = groupFiles[index];
+                  final originalIndex = player.mediaFiles.indexOf(media);
+                  final isCurrent = originalIndex == player.currentIndex;
+                  final isFavorite = favorites.isFavorite(media.path);
+                  final isSelected = thumbnail.selectedFiles.contains(media.path);
+                  
+                  return _buildThumbnailItem(
+                    media,
+                    originalIndex,
+                    isCurrent,
+                    isFavorite,
+                    isSelected,
+                    player,
+                    thumbnail,
+                  );
+                },
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // 缩略图单项
+  Widget _buildThumbnailItem(
+    MediaFile media,
+    int originalIndex,
+    bool isCurrent,
+    bool isFavorite,
+    bool isSelected,
+    PlayerProvider player,
+    ThumbnailProvider thumbnail,
+  ) {
+    return GestureDetector(
+      onTap: () {
+        if (thumbnail.isSelectionMode) {
+          thumbnail.toggleSelection(media.path);
+        } else {
+          player.jumpToIndex(originalIndex);
+          setState(() {
+            _showThumbnails = false;
+            _transformationController.value = Matrix4.identity();
+          });
+        }
+      },
+      onLongPress: () {
+        if (!thumbnail.isSelectionMode) {
+          thumbnail.toggleSelectionMode();
+          thumbnail.toggleSelection(media.path);
+        }
+      },
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: isSelected
+                    ? Colors.green
+                    : isCurrent
+                        ? Colors.blue
+                        : Colors.transparent,
+                width: isSelected ? 4 : 3,
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: media.isImage
+                  ? Image.file(
+                      media.file,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) {
+                        return Container(
+                          color: Colors.grey[900],
+                          child: const Icon(Icons.broken_image, color: Colors.grey, size: 32),
+                        );
+                      },
+                    )
+                  : Container(
+                      color: Colors.grey[800],
+                      child: const Icon(Icons.play_circle_outline, color: Colors.white, size: 40),
+                    ),
+            ),
+          ),
+          
+          if (thumbnail.isSelectionMode)
+            Positioned(
+              top: 4,
+              left: 4,
+              child: Container(
+                width: 24,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: isSelected ? Colors.green : Colors.black.withOpacity(0.6),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 2),
+                ),
+                child: isSelected
+                    ? const Icon(Icons.check, color: Colors.white, size: 16)
+                    : null,
+              ),
+            ),
+          
+          if (!thumbnail.isSelectionMode && isFavorite)
+            Positioned(
+              top: 4,
+              right: 4,
+              child: Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.7),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.favorite, color: Colors.red, size: 12),
+              ),
+            ),
+          
+          if (isCurrent && !thumbnail.isSelectionMode)
+            Positioned(
+              bottom: 4,
+              left: 4,
+              right: 4,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.blue,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text(
+                  '播放中',
+                  style: TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // 批量操作工具栏
+  Widget _buildSelectionToolbar(PlayerProvider player, FavoritesProvider favorites, ThumbnailProvider thumbnail) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.9),
+        border: const Border(top: BorderSide(color: Colors.white24, width: 1)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          ElevatedButton.icon(
+            onPressed: () {
+              final files = thumbnail.filterFiles(player.mediaFiles);
+              thumbnail.selectAll(files);
+            },
+            icon: const Icon(Icons.select_all, size: 20),
+            label: const Text('全选'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.blue,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            ),
+          ),
+          
+          ElevatedButton.icon(
+            onPressed: thumbnail.selectedFiles.isEmpty
+                ? null
+                : () async {
+                    await favorites.addMultipleFavorites(thumbnail.selectedFiles);
+                    _showSnackBar('已添加 ${thumbnail.selectedFiles.length} 个到收藏', Colors.green);
+                    thumbnail.clearSelection();
+                  },
+            icon: const Icon(Icons.favorite, size: 20),
+            label: Text('收藏 (${thumbnail.selectedFiles.length})'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            ),
+          ),
+          
+          ElevatedButton.icon(
+            onPressed: thumbnail.selectedFiles.isEmpty
+                ? null
+                : () async {
+                    try {
+                      final files = thumbnail.selectedFiles
+                          .map((p) => XFile(p))
+                          .toList();
+                      await Share.shareXFiles(
+                        files,
+                        text: '分享 ${files.length} 个文件',
+                      );
+                    } catch (e) {
+                      _showSnackBar('分享失败: $e', Colors.red);
+                    }
+                  },
+            icon: const Icon(Icons.share, size: 20),
+            label: Text('分享 (${thumbnail.selectedFiles.length})'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.green,
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
             ),
           ),
         ],
@@ -1189,7 +2170,6 @@ class _HomeScreenState extends State<HomeScreen> {
               text: '分享: ${media.name}',
             );
           } catch (e) {
-            print('分享失败: $e');
             _showSnackBar('分享失败: $e', Colors.red);
           }
         },
@@ -1353,6 +2333,37 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
               
+              ListTile(
+                leading: const Icon(Icons.sort),
+                title: const Text('缩略图排序'),
+                trailing: DropdownButton<SortType>(
+                  value: player.sortType,
+                  items: SortType.values.map((type) {
+                    String name;
+                    switch (type) {
+                      case SortType.timeNewest:
+                        name = '最新优先';
+                        break;
+                      case SortType.timeOldest:
+                        name = '最旧优先';
+                        break;
+                      case SortType.folder:
+                        name = '按文件夹';
+                        break;
+                      case SortType.dateGroup:
+                        name = '按日期';
+                        break;
+                    }
+                    return DropdownMenuItem(value: type, child: Text(name));
+                  }).toList(),
+                  onChanged: (v) {
+                    if (v != null) {
+                      player.setSortType(v);
+                    }
+                  },
+                ),
+              ),
+              
               const Divider(),
               
               SwitchListTile(
@@ -1396,23 +2407,77 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               
               ListTile(
-                leading: const Icon(Icons.search),
-                title: const Text('扫描整个设备'),
+                leading: const Icon(Icons.refresh),
+                title: const Text('重新扫描设备'),
+                subtitle: const Text('清除缓存并重新扫描'),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () {
+                onTap: () async {
                   Navigator.pop(context);
-                  _scanAllImages();
+                  final confirm = await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('重新扫描'),
+                      content: const Text('这将清除缓存并重新扫描整个设备，确定继续吗？'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context, false),
+                          child: const Text('取消'),
+                        ),
+                        ElevatedButton(
+                          onPressed: () => Navigator.pop(context, true),
+                          child: const Text('确定'),
+                        ),
+                      ],
+                    ),
+                  );
+                  
+                  if (confirm == true && mounted) {
+                    await player.rescan();
+                  }
+                },
+              ),
+              
+              ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: const Text('清除缓存'),
+                subtitle: const Text('删除已保存的文件列表'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await MediaDatabase.clearCache();
+                  _showSnackBar('缓存已清除', Colors.green);
                 },
               ),
               
               const Divider(),
               
-              ListTile(
-                leading: const Icon(Icons.info_outline),
-                title: const Text('关于'),
-                subtitle: Text(
-                  '版本 2.0.0\n共 ${player.totalCount} 个媒体文件\n收藏 ${favorites.favorites.length} 个',
-                ),
+              FutureBuilder<DateTime?>(
+                future: MediaDatabase.getCacheTime(),
+                builder: (context, snapshot) {
+                  if (snapshot.hasData && snapshot.data != null) {
+                    final cacheTime = snapshot.data!;
+                    final formatter = DateFormat('yyyy-MM-dd HH:mm:ss');
+                    return ListTile(
+                      leading: const Icon(Icons.info_outline),
+                      title: const Text('关于'),
+                      subtitle: Text(
+                        '版本 2.1.0\n'
+                        '共 ${player.totalCount} 个媒体文件\n'
+                        '收藏 ${favorites.favorites.length} 个\n'
+                        '缓存时间: ${formatter.format(cacheTime)}',
+                      ),
+                    );
+                  }
+                  return ListTile(
+                    leading: const Icon(Icons.info_outline),
+                    title: const Text('关于'),
+                    subtitle: Text(
+                      '版本 2.1.0\n'
+                      '共 ${player.totalCount} 个媒体文件\n'
+                      '收藏 ${favorites.favorites.length} 个',
+                    ),
+                  );
+                },
               ),
             ],
           ),
@@ -1425,11 +2490,5 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    _videoController?.dispose();
-    super.dispose();
   }
 }
