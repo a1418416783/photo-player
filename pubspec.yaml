@@ -3,7 +3,7 @@ description: Advanced photo and video player app
 
 publish_to: 'none'
 
-version: 2.0.0+1
+version: 2.1.0+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -17,15 +17,15 @@ dependencies:
   video_player: ^2.8.1
   path: ^1.8.3
   provider: ^6.1.1
+  shared_preferences: ^2.2.2
+  share_plus: ^7.2.1
+  audioplayers: ^5.2.1
+  path_provider: ^2.1.1
   
-  # 新增依赖
-  shared_preferences: ^2.2.2  # 保存收藏和设置
-  share_plus: ^7.2.1          # 分享功能
-  audioplayers: ^5.2.1        # 背景音乐
-  path_provider: ^2.1.1       # 文件路径
-  sqflite: ^2.3.0
-  wakelock_plus: ^1.2.0
-  intl: ^0.18.1  # 新增
+  # 使用兼容的版本
+  sqflite: ^2.2.8+4
+  wakelock_plus: ^1.1.4
+  intl: ^0.18.1
 
 dev_dependencies:
   flutter_test:
@@ -34,7 +34,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  
-  # 添加示例音乐文件（可选）
-  assets:
-    - assets/music/
