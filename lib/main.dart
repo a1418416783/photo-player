@@ -618,6 +618,7 @@ class MediaScanner {
       
       final fileName = path.basename(file.path);
       
+      // 检查文件大小
       try {
         final fileSize = await file.length().timeout(
           const Duration(milliseconds: 100),
@@ -628,6 +629,7 @@ class MediaScanner {
         return null;
       }
       
+      // 获取文件修改时间
       int lastModified;
       try {
         final stat = await file.stat().timeout(
@@ -639,6 +641,7 @@ class MediaScanner {
         lastModified = DateTime.now().millisecondsSinceEpoch;
       }
       
+      // 判断文件类型并返回
       if (imageExts.contains(ext)) {
         return MediaFile(
           path: file.path,
@@ -661,7 +664,6 @@ class MediaScanner {
     return null;
   }
 }
-      if (stat == null) return null;
       final lastModified = stat.modified.millisecondsSinceEpoch;
       if (imageExts.contains(ext)) {
         return MediaFile(path: file.path, type: MediaType.image, name: fileName, lastModified: lastModified);
