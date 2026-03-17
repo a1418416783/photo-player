@@ -7,7 +7,7 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     
     <application
-        android:label="相册播放器"
+        android:label="相册播放器 Pro"
         android:name="${applicationName}"
         android:icon="@android:drawable/ic_menu_gallery">
         
@@ -20,6 +20,13 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            
+            <!-- 分享功能 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
             </intent-filter>
         </activity>
         
