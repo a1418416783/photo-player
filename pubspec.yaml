@@ -1,9 +1,9 @@
 name: photo_player
-description: Photo and video player app
+description: Advanced photo and video player app
 
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 2.0.0+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -17,6 +17,12 @@ dependencies:
   video_player: ^2.8.1
   path: ^1.8.3
   provider: ^6.1.1
+  
+  # 新增依赖
+  shared_preferences: ^2.2.2  # 保存收藏和设置
+  share_plus: ^7.2.1          # 分享功能
+  audioplayers: ^5.2.1        # 背景音乐
+  path_provider: ^2.1.1       # 文件路径
 
 dev_dependencies:
   flutter_test:
@@ -25,3 +31,7 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  
+  # 添加示例音乐文件（可选）
+  assets:
+    - assets/music/
