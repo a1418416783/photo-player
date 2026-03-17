@@ -570,7 +570,10 @@ class MediaScanner {
       }
       FileStat? stat;
       try {
-        stat = await file.stat().timeout(const Duration(milliseconds: 100), onTimeout: () => null);
+        stat = await file.stat().timeout(
+          const Duration(milliseconds: 100),
+          onTimeout: () => throw TimeoutException('stat timeout'),
+        );
       } catch (e) {
         return null;
       }
