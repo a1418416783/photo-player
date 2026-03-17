@@ -21,8 +21,6 @@ dependencies:
   share_plus: ^7.2.1
   audioplayers: ^5.2.1
   path_provider: ^2.1.1
-  
-  # 使用兼容的版本
   sqflite: ^2.2.8+4
   wakelock_plus: ^1.1.4
   intl: ^0.18.1
