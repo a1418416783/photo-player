@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:video_player/video_player.dart';
 import 'package:path/path.dart' as path;
 
@@ -218,22 +217,6 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   VideoPlayerController? _videoController;
-  bool _permissionsGranted = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _checkPermissions();
-  }
-
-  Future<void> _checkPermissions() async {
-    await Permission.storage.request();
-    await Permission.photos.request();
-    await Permission.videos.request();
-    setState(() {
-      _permissionsGranted = true;
-    });
-  }
 
   Future<void> _selectFolder() async {
     try {
@@ -243,20 +226,20 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (e) {
       print('选择文件夹失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('选择文件夹失败，请确保已授予存储权限'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_permissionsGranted) {
-      return const Scaffold(
-        backgroundColor: Colors.black,
-        body: Center(
-          child: CircularProgressIndicator(color: Colors.white),
-        ),
-      );
-    }
-
     return Scaffold(
       backgroundColor: Colors.black,
       body: Consumer<PlayerProvider>(
@@ -286,6 +269,15 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(height: 16),
                   const Text('点击下方按钮选择相册文件夹',
                     style: TextStyle(color: Colors.white70, fontSize: 16)),
+                  const SizedBox(height: 8),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 40),
+                    child: Text(
+                      '提示：首次使用时，系统会请求存储权限，请点击"允许"',
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
                   const SizedBox(height: 32),
                   ElevatedButton.icon(
                     onPressed: _selectFolder,
