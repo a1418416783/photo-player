@@ -46,37 +46,3 @@ jobs:
         name: app-release-apk
         path: build/app/outputs/flutter-apk/app-release.apk
         retention-days: 30
-    
-    - name: Create Release
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: v1.0.${{ github.run_number }}
-        name: Release v1.0.${{ github.run_number }}
-        files: build/app/outputs/flutter-apk/app-release.apk
-        body: |
-          ## 相册播放器 APK
-          
-          ### 功能特性
-          - 📸 支持图片循环播放
-          - 🎥 支持2分钟以内的视频播放
-          - ⚙️ 可自定义图片显示时长
-          - 🔄 支持顺序播放
-          - 📱 横屏全屏显示
-          
-          ### 安装说明
-          1. 下载下方的 app-release.apk 文件
-          2. 在华为平板上打开文件管理器
-          3. 找到下载的APK文件并点击安装
-          4. 允许"未知来源"安装
-          5. 安装完成后打开应用
-          
-          ### 使用方法
-          1. 打开应用后，点击"选择文件夹"
-          2. 系统会自动请求存储权限，点击"允许"
-          3. 选择包含照片/视频的文件夹
-          4. 应用会自动开始播放
-          
-          构建时间: ${{ github.event.head_commit.timestamp }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
