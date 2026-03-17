@@ -462,7 +462,6 @@ class MediaScanner {
     } catch (e, stackTrace) {
       print('扫描失败: $e');
       print('堆栈: $stackTrace');
-      print('已扫描: $_scannedCount 个文件, 已找到: ${allMediaFiles.length} 个媒体');
     }
     
     final uniqueFiles = <String, MediaFile>{};
@@ -507,7 +506,7 @@ class MediaScanner {
       
       if (processedDirs % 50 == 0) {
         final elapsed = DateTime.now().difference(startTime);
-        print('进度: 已处理 $processedDirs 个目录, 找到 ${result.length} 个文件, 耗时: ${elapsed.inMinutes}分${elapsed.inSeconds % 60}秒');
+        print('进度: 已处理 $processedDirs 个目录, 找到 ${result.length} 个文件');
         onProgress?.call(result.length, currentDir.path);
       }
       
@@ -551,13 +550,12 @@ class MediaScanner {
         
       } catch (e) {
         errorDirs++;
-        print('扫描目录失败: ${currentDir.path}, 错误: $e');
         continue;
       }
     }
     
     final totalTime = DateTime.now().difference(startTime);
-    print('扫描统计: 处理目录=$processedDirs, 跳过=$skippedDirs, 错误=$errorDirs, 扫描文件=$_scannedCount, 找到媒体=$_foundCount, 耗时=${totalTime.inMinutes}分${totalTime.inSeconds % 60}秒');
+    print('扫描统计: 目录=$processedDirs, 文件=$_scannedCount, 媒体=$_foundCount');
   }
   
   Future<void> _scanRecursively(Directory folder, List<MediaFile> result, int depth) async {
@@ -596,7 +594,7 @@ class MediaScanner {
         }
       }
     } catch (e) {
-      print('扫描目录失败: ${folder.path}');
+      // 忽略错误继续
     }
   }
   
@@ -618,7 +616,6 @@ class MediaScanner {
       
       final fileName = path.basename(file.path);
       
-      // 检查文件大小
       try {
         final fileSize = await file.length().timeout(
           const Duration(milliseconds: 100),
@@ -629,19 +626,17 @@ class MediaScanner {
         return null;
       }
       
-      // 获取文件修改时间
       int lastModified;
       try {
         final stat = await file.stat().timeout(
           const Duration(milliseconds: 100),
-          onTimeout: () => throw TimeoutException('stat timeout'),
+          onTimeout: () => throw TimeoutException('timeout'),
         );
         lastModified = stat.modified.millisecondsSinceEpoch;
       } catch (e) {
         lastModified = DateTime.now().millisecondsSinceEpoch;
       }
       
-      // 判断文件类型并返回
       if (imageExts.contains(ext)) {
         return MediaFile(
           path: file.path,
@@ -663,7 +658,7 @@ class MediaScanner {
     }
     return null;
   }
-}
+}  
       final lastModified = stat.modified.millisecondsSinceEpoch;
       if (imageExts.contains(ext)) {
         return MediaFile(path: file.path, type: MediaType.image, name: fileName, lastModified: lastModified);
