@@ -58,7 +58,16 @@ class MediaFile {
 }
 
 class MediaScanner {
-  static const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+  static const imageExts = [
+  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp',  // 常见格式
+  'heic', 'heif',  // iOS格式
+  'tiff', 'tif',   // TIFF格式
+  'svg',           // 矢量图
+  'ico',           // 图标
+  'jfif',          // JPEG变体
+  'pjpeg', 'pjp',  // 渐进式JPEG
+  'avif',          // 新格式
+];
   static const videoExts = ['mp4', 'avi', 'mov', 'mkv', '3gp'];
   
   Future<List<MediaFile>> scanDirectory(String dirPath) async {
