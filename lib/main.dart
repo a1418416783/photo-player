@@ -562,21 +562,53 @@ class MediaScanner {
       final ext = path.extension(file.path).toLowerCase().replaceAll('.', '');
       if (ext.isEmpty) return null;
       final fileName = path.basename(file.path);
+      
+      // 检查文件大小
       try {
-        final fileSize = await file.length().timeout(const Duration(milliseconds: 100), onTimeout: () => 0);
+        final fileSize = await file.length().timeout(
+          const Duration(milliseconds: 100),
+          onTimeout: () => 0,
+        );
         if (fileSize < 1024) return null;
       } catch (e) {
         return null;
       }
-      FileStat? stat;
+      
+      // 获取文件信息 - 修复空安全问题
+      int lastModified;
       try {
-        stat = await file.stat().timeout(
+        final stat = await file.stat().timeout(
           const Duration(milliseconds: 100),
           onTimeout: () => throw TimeoutException('stat timeout'),
         );
+        lastModified = stat.modified.millisecondsSinceEpoch;
       } catch (e) {
-        return null;
+        // 如果获取stat失败，使用当前时间
+        lastModified = DateTime.now().millisecondsSinceEpoch;
       }
+      
+      if (imageExts.contains(ext)) {
+        return MediaFile(
+          path: file.path,
+          type: MediaType.image,
+          name: fileName,
+          lastModified: lastModified,
+        );
+      } else if (videoExts.contains(ext)) {
+        return MediaFile(
+          path: file.path,
+          type: MediaType.video,
+          name: fileName,
+          duration: 60,
+          lastModified: lastModified,
+        );
+      }
+    } catch (e) {
+      return null;
+    }
+    return null;
+  }
+}
       if (stat == null) return null;
       final lastModified = stat.modified.millisecondsSinceEpoch;
       if (imageExts.contains(ext)) {
