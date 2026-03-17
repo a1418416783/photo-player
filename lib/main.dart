@@ -659,18 +659,7 @@ class MediaScanner {
     return null;
   }
 }  
-      final lastModified = stat.modified.millisecondsSinceEpoch;
-      if (imageExts.contains(ext)) {
-        return MediaFile(path: file.path, type: MediaType.image, name: fileName, lastModified: lastModified);
-      } else if (videoExts.contains(ext)) {
-        return MediaFile(path: file.path, type: MediaType.video, name: fileName, duration: 60, lastModified: lastModified);
-      }
-    } catch (e) {
-      return null;
-    }
-    return null;
-  }
-}
+      
 class PlayerProvider with ChangeNotifier {
   List<MediaFile> _mediaFiles = [];
   int _currentIndex = 0;
