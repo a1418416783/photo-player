@@ -37,7 +37,6 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// 媒体文件模型
 enum MediaType { image, video }
 
 class MediaFile {
@@ -58,7 +57,6 @@ class MediaFile {
   bool get isVideo => type == MediaType.video;
 }
 
-// 媒体扫描服务
 class MediaScanner {
   static const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
   static const videoExts = ['mp4', 'avi', 'mov', 'mkv', '3gp'];
@@ -114,7 +112,6 @@ class MediaScanner {
   }
 }
 
-// 播放器状态管理
 class PlayerProvider with ChangeNotifier {
   List<MediaFile> _mediaFiles = [];
   int _currentIndex = 0;
@@ -207,7 +204,6 @@ class PlayerProvider with ChangeNotifier {
   }
 }
 
-// 主界面
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
 
@@ -229,9 +225,8 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('选择文件夹失败，请确保已授予存储权限'),
+            content: Text('选择文件夹失败: $e'),
             backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
           ),
         );
       }
@@ -269,15 +264,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(height: 16),
                   const Text('点击下方按钮选择相册文件夹',
                     style: TextStyle(color: Colors.white70, fontSize: 16)),
-                  const SizedBox(height: 8),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 40),
-                    child: Text(
-                      '提示：首次使用时，系统会请求存储权限，请点击"允许"',
-                      style: TextStyle(color: Colors.white54, fontSize: 12),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
                   const SizedBox(height: 32),
                   ElevatedButton.icon(
                     onPressed: _selectFolder,
